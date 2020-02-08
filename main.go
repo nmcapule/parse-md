@@ -28,6 +28,27 @@ type Node struct {
 	Children []*Node
 }
 
+func from(token string) *Node {
+	switch strings.TrimSpace(token) {
+	case "":
+		return &Node{token, TypeNewline, nil}
+	case "#":
+		return &Node{token, TypeH1, nil}
+	case "##":
+		return &Node{token, TypeH2, nil}
+	case "###":
+		return &Node{token, TypeH3, nil}
+	case "####":
+		return &Node{token, TypeH4, nil}
+	case "*":
+		return &Node{token, TypeItalic, nil}
+	case "**":
+		return &Node{token, TypeBold, nil}
+	default:
+		return &Node{token, TypeText, nil}
+	}
+}
+
 func split(data []byte, eof bool) (int, []byte, error) {
 	var start int
 
@@ -66,6 +87,21 @@ func tokenize(reader io.Reader) []string {
 	return tokens
 }
 
+func parse(reader io.Reader) *Node {
+	var stack []*Node
+
+	tokens := tokenize(reader)
+	for _, token := range tokens {
+		node := from(token)
+		if node.Type == TypeText {
+			continue
+		}
+		stack = append(stack, node)
+	}
+
+	return stack[0]
+}
+
 // func parse(input string) *Node {
 // 	var buf bytes.Buffer
 // 	// var stack []*Node
@@ -78,7 +114,7 @@ func tokenize(reader io.Reader) []string {
 
 func main() {
 	const test = `
-	#Symbol
+	#**Sym**bol
 
 
 	This is a **bold text**.

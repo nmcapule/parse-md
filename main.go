@@ -4,18 +4,6 @@ import (
 	"fmt"
 )
 
-func startsWith(data, prefix []byte) bool {
-	if len(prefix) > len(data) {
-		return false
-	}
-	for i, ch := range prefix {
-		if ch != data[i] {
-			return false
-		}
-	}
-	return true
-}
-
 type tokenizer struct {
 	tokens [][]byte
 	data   []byte
@@ -58,26 +46,76 @@ func (t *tokenizer) tryConsume(token []byte) bool {
 	return false
 }
 
-func (t *tokenizer) nextStartsWith(token []byte) bool {
-	return startsWith(t.data[t.cursor:], token)
+func (t *tokenizer) nextStartsWith(prefix []byte) bool {
+	if len(prefix) > len(t.data[t.cursor:]) {
+		return false
+	}
+	for i, ch := range prefix {
+		if ch != t.data[i+t.cursor] {
+			return false
+		}
+	}
+	return true
 }
 
-func (t *tokenizer) readExpression() bool {
+func (t *tokenizer) readLink() bool {
+	t.tryConsume([]byte("["))
+
+	t.readExpression([]byte("]"))
+
+	if ok := t.tryConsume([]byte("(")); !ok {
+		return true
+	}
+
+	start := t.cursor
+	for !t.nextStartsWith([]byte(")")) {
+		t.cursor += 1
+	}
+	t.push("link", t.data[start:t.cursor])
+
+	t.tryConsume([]byte(")"))
+
+	return true
+}
+
+func equal(left, right []byte) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i, ch := range left {
+		if ch != right[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func (t *tokenizer) readExpression(delim []byte) bool {
 	start := t.cursor
 	for {
 		if t.eof() {
-			token := t.data[start:t.cursor]
-			t.push("expr", token)
+			t.push("expr", t.data[start:t.cursor])
 			break
 		}
-		if ok := t.nextStartsWith([]byte("\n\n")); ok {
-			token := t.data[start:t.cursor]
-			t.push("expr", token)
-			t.tryConsume([]byte("\n\n"))
+		if ok := t.nextStartsWith(delim); ok {
+			t.push("expr", t.data[start:t.cursor])
 			break
+		}
+		if ok := t.nextStartsWith([]byte("[")); ok {
+			t.push("expr", t.data[start:t.cursor])
+			t.readLink()
+			start = t.cursor
+			continue
+		}
+		if ok := t.nextStartsWith([]byte("**")); ok {
+			t.tryConsume([]byte("**"))
+			t.readExpression([]byte("**"))
+			start = t.cursor
+			continue
 		}
 		t.cursor += 1
 	}
+	t.tryConsume(delim)
 	t.skipSpace()
 
 	return true
@@ -98,7 +136,7 @@ func (t *tokenizer) readHeader() bool {
 
 	t.skipSpace()
 
-	t.readExpression()
+	t.readExpression([]byte("\n\n"))
 
 	return true
 }
@@ -130,14 +168,14 @@ func (t *tokenizer) readCodeBlock() bool {
 func (t *tokenizer) read() bool {
 	t.skipSpace()
 
-	if startsWith(t.data[t.cursor:], []byte("#")) {
+	if t.nextStartsWith([]byte("#")) {
 		return t.readHeader()
 	}
-	if startsWith(t.data[t.cursor:], []byte("```")) {
+	if t.nextStartsWith([]byte("```")) {
 		return t.readCodeBlock()
 	}
 
-	return t.readExpression()
+	return t.readExpression([]byte("\n\n"))
 }
 
 func (t *tokenizer) eof() bool {
@@ -151,30 +189,25 @@ func main() {
 	This is a **bold text**.
 	as a multiline expr
 
-	And this is an *italic text*.
+	And this is a ***scandalous text***.
+
+	And [this] is an *italic text*.
 
 	And
 
 	` + "```" + `
 	code block
 	i am
-
-	a fucking
-
+	a [fucking]
 	another
-
 	code block
-
-
-
-
-
 	shit
 	` + "```" + `
 
 	## Ohshit
 
-	I am a [link](http://markdown.com)
+	I am a [link](http://markdown.com) here
+	and multiline
 
 	----
 
@@ -190,6 +223,6 @@ func main() {
 	}
 
 	for _, token := range tok.tokens {
-		fmt.Println("[" + string(token) + "]")
+		fmt.Println("<" + string(token) + ">")
 	}
 }

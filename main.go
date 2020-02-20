@@ -1,83 +1,176 @@
 package main
 
 import (
-	"bufio"
 	"fmt"
-	"regexp"
-	"strings"
 )
 
-var (
-	wordsRe = regexp.MustCompile(`^[\w \t\.\-]+`)
-)
-
-func scopedEqual(left, right []byte) bool {
-	min := len(left)
-	if len(right) < min {
-		min = len(right)
+func startsWith(data, prefix []byte) bool {
+	if len(prefix) > len(data) {
+		return false
 	}
-
-	return string(left[:min]) == string(right[:min])
-}
-
-func readWhile(data []byte, while byte) int {
-	for i, ch := range data {
-		if ch != while {
-			return i
+	for i, ch := range prefix {
+		if ch != data[i] {
+			return false
 		}
 	}
-	return len(data)
+	return true
 }
 
-func readUntilBytes(data []byte, until []byte) int {
-	for i := range data {
-		if scopedEqual(data[i:], until) {
-			return i + len(until)
+type tokenizer struct {
+	tokens [][]byte
+	data   []byte
+	cursor int
+}
+
+func newTokenizer(data []byte) *tokenizer {
+	return &tokenizer{data: data}
+}
+
+func (t *tokenizer) skipSpace() {
+	for {
+		if t.eof() {
+			break
 		}
+		if t.data[t.cursor] == ' ' {
+			t.cursor += 1
+		}
+		if t.data[t.cursor] == '\n' {
+			t.cursor += 1
+		}
+		if t.data[t.cursor] == '\t' {
+			t.cursor += 1
+		}
+		break
 	}
-	return len(data)
 }
 
-func markdownSplitFunc(data []byte, eof bool) (int, []byte, error) {
-	if eof && len(data) == 0 {
-		return 0, nil, nil
+func (t *tokenizer) push(kind string, token []byte) {
+	// t.tokens = append(t.tokens, []byte(kind+": "+string(token)))
+	t.tokens = append(t.tokens, token)
+}
+
+func (t *tokenizer) tryConsume(token []byte) bool {
+	if t.nextStartsWith(token) {
+		t.push("keyword", token)
+		t.cursor += len(token)
+		return true
+	}
+	return false
+}
+
+func (t *tokenizer) nextStartsWith(token []byte) bool {
+	return startsWith(t.data[t.cursor:], token)
+}
+
+func (t *tokenizer) readExpression() bool {
+	start := t.cursor
+	for {
+		if t.eof() {
+			token := t.data[start:t.cursor]
+			t.push("expr", token)
+			break
+		}
+		if ok := t.nextStartsWith([]byte("\n\n")); ok {
+			token := t.data[start:t.cursor]
+			t.push("expr", token)
+			t.tryConsume([]byte("\n\n"))
+			break
+		}
+		t.cursor += 1
+	}
+	t.skipSpace()
+
+	return true
+}
+
+func (t *tokenizer) readHighlight() bool {
+	t.skipSpace()
+	// t.readExpression
+
+	return true
+}
+
+func (t *tokenizer) readHeader() bool {
+	t.tryConsume([]byte("####"))
+	t.tryConsume([]byte("###"))
+	t.tryConsume([]byte("##"))
+	t.tryConsume([]byte("#"))
+
+	t.skipSpace()
+
+	t.readExpression()
+
+	return true
+}
+
+func (t *tokenizer) readCodeBlock() bool {
+	t.tryConsume([]byte("```"))
+
+	start := t.cursor
+	for {
+		if t.eof() {
+			token := t.data[start:t.cursor]
+			t.push("code", token)
+			break
+		}
+		if ok := t.nextStartsWith([]byte("```")); ok {
+			token := t.data[start:t.cursor]
+			t.push("code", token)
+			t.tryConsume([]byte("```"))
+			break
+		}
+		t.cursor += 1
 	}
 
-	if scopedEqual(data, []byte("\n\n")) {
-		return 2, []byte("-newline-"), nil
+	t.skipSpace()
+
+	return true
+}
+
+func (t *tokenizer) read() bool {
+	t.skipSpace()
+
+	if startsWith(t.data[t.cursor:], []byte("#")) {
+		return t.readHeader()
 	}
-	if scopedEqual(data, []byte("'''")) {
-		advance := readUntilBytes(data[3:], []byte("'''")) + 3
-		return advance, data[:advance], nil
-	}
-	switch data[0] {
-	case '*', '#', '-', '\n', '\t':
-		fallthrough
-	case '[', ']', '(', ')':
-		advance := readWhile(data, data[0])
-		return advance, data[:advance], nil
+	if startsWith(t.data[t.cursor:], []byte("```")) {
+		return t.readCodeBlock()
 	}
 
-	match := wordsRe.Find(data)
+	return t.readExpression()
+}
 
-	return len(match), match, nil
+func (t *tokenizer) eof() bool {
+	return t.cursor >= len(t.data)
 }
 
 func main() {
 	const test = `
 	#**Sym**bol
 
-
 	This is a **bold text**.
+	as a multiline expr
 
 	And this is an *italic text*.
 
 	And
 
-	'''
+	` + "```" + `
 	code block
 	i am
-	'''
+
+	a fucking
+
+	another
+
+	code block
+
+
+
+
+
+	shit
+	` + "```" + `
 
 	## Ohshit
 
@@ -91,13 +184,12 @@ func main() {
 	multiline.
 	`
 
-	scanner := bufio.NewScanner(strings.NewReader(test))
-	scanner.Split(markdownSplitFunc)
-	for scanner.Scan() {
-		trimmed := strings.TrimSpace(scanner.Text())
-		if trimmed == "" {
-			continue
-		}
-		fmt.Println("[" + strings.TrimSpace(scanner.Text()) + "]")
+	tok := newTokenizer([]byte(test))
+	for !tok.eof() {
+		tok.read()
+	}
+
+	for _, token := range tok.tokens {
+		fmt.Println("[" + string(token) + "]")
 	}
 }

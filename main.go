@@ -2,184 +2,160 @@ package main
 
 import (
 	"fmt"
+	"regexp"
 )
 
-type tokenizer struct {
-	tokens [][]byte
+var (
+	whitespaceRe = regexp.MustCompile("^\\s+")
+	blockDelimRe = regexp.MustCompile("^\n\n")
+	escapeRe     = regexp.MustCompile("^\\\\.")
+	headerRe     = regexp.MustCompile("^#+")
+	codeRe       = regexp.MustCompile("^`")
+	codeBlockRe  = regexp.MustCompile("^```")
+	rulerRe      = regexp.MustCompile("^\\-{3,}")
+)
+
+type Token struct {
+	Kind     string
+	Value    []byte
+	Parent   *Token
+	Children []*Token
+}
+
+func (t *Token) PrintTree(level int) {
+	for i := 0; i <= level; i++ {
+		fmt.Printf("----")
+	}
+	fmt.Println(t.String())
+	for _, node := range t.Children {
+		node.PrintTree(level + 1)
+	}
+}
+
+func (t *Token) String() string {
+	return fmt.Sprintf("%s: %s", t.Kind, string(t.Value))
+}
+
+type Parser struct {
+	tokens []*Token
 	data   []byte
-	cursor int
+	idx    int
 }
 
-func newTokenizer(data []byte) *tokenizer {
-	return &tokenizer{data: data}
+func NewParser(data []byte) *Parser {
+	return &Parser{data: data}
 }
 
-func (t *tokenizer) skipSpace() {
-	for {
-		if t.eof() {
-			break
-		}
-		if t.data[t.cursor] == ' ' {
-			t.cursor += 1
-		}
-		if t.data[t.cursor] == '\n' {
-			t.cursor += 1
-		}
-		if t.data[t.cursor] == '\t' {
-			t.cursor += 1
-		}
-		break
+func (p *Parser) Print() {
+	for _, node := range p.tokens {
+		node.PrintTree(0)
 	}
 }
 
-func (t *tokenizer) push(kind string, token []byte) {
-	// t.tokens = append(t.tokens, []byte(kind+": "+string(token)))
-	t.tokens = append(t.tokens, token)
+func (p *Parser) Rest() []byte {
+	return p.data[p.idx:]
 }
 
-func (t *tokenizer) tryConsume(token []byte) bool {
-	if t.nextStartsWith(token) {
-		t.push("keyword", token)
-		t.cursor += len(token)
-		return true
-	}
-	return false
+func (p *Parser) EOF() bool {
+	return p.idx >= len(p.data)
 }
 
-func (t *tokenizer) nextStartsWith(prefix []byte) bool {
-	if len(prefix) > len(t.data[t.cursor:]) {
-		return false
+func (p *Parser) skipRegex(re *regexp.Regexp) {
+	_, _, right := p.findIndex(re)
+	p.idx += right
+}
+
+func (p *Parser) findIndex(re *regexp.Regexp) ([]byte, int, int) {
+	idxs := re.FindIndex(p.Rest())
+	if idxs == nil {
+		return nil, 0, 0
 	}
-	for i, ch := range prefix {
-		if ch != t.data[i+t.cursor] {
-			return false
+	return p.Rest()[idxs[0]:idxs[1]], idxs[0], idxs[1]
+}
+
+func (p *Parser) startsRegex(re *regexp.Regexp) bool {
+	return re.Match(p.Rest())
+}
+
+func (p *Parser) Parse() {
+	for !p.EOF() {
+		p.skipRegex(whitespaceRe)
+		if headerRe.Match(p.Rest()) {
+			p.tokens = append(p.tokens, p.parseHeader())
+		} else if rulerRe.Match(p.Rest()) {
+			p.tokens = append(p.tokens, &Token{Kind: "ruler"})
+			p.skipRegex(rulerRe)
+		} else {
+			p.tokens = append(p.tokens, &Token{
+				Kind:     "block",
+				Children: p.parseExpression(blockDelimRe),
+			})
 		}
 	}
-	return true
 }
 
-func (t *tokenizer) readLink() bool {
-	t.tryConsume([]byte("["))
+func (p *Parser) parseHeader() *Token {
+	match, _, right := p.findIndex(headerRe)
+	p.idx += right
 
-	t.readExpression([]byte("]"))
-
-	if ok := t.tryConsume([]byte("(")); !ok {
-		return true
+	token := &Token{
+		Kind:     "header",
+		Value:    match,
+		Children: p.parseExpression(blockDelimRe),
 	}
-
-	start := t.cursor
-	for !t.nextStartsWith([]byte(")")) {
-		t.cursor += 1
-	}
-	t.push("link", t.data[start:t.cursor])
-
-	t.tryConsume([]byte(")"))
-
-	return true
+	return token
 }
 
-func equal(left, right []byte) bool {
-	if len(left) != len(right) {
-		return false
-	}
-	for i, ch := range left {
-		if ch != right[i] {
-			return false
-		}
-	}
-	return true
-}
+func (p *Parser) parseExpression(delimRe *regexp.Regexp) []*Token {
+	var tokens []*Token
 
-func (t *tokenizer) readExpression(delim []byte) bool {
-	start := t.cursor
-	for {
-		if t.eof() {
-			t.push("expr", t.data[start:t.cursor])
-			break
-		}
-		if ok := t.nextStartsWith(delim); ok {
-			t.push("expr", t.data[start:t.cursor])
-			break
-		}
-		if ok := t.nextStartsWith([]byte("[")); ok {
-			t.push("expr", t.data[start:t.cursor])
-			t.readLink()
-			start = t.cursor
+	p.skipRegex(whitespaceRe)
+
+	start := p.idx
+	for !p.startsRegex(delimRe) && !p.EOF() {
+		p.skipRegex(escapeRe)
+		if p.startsRegex(codeBlockRe) {
+			if p.idx > start {
+				tokens = append(tokens, &Token{Kind: "plain", Value: p.data[start:p.idx]})
+			}
+			tokens = append(tokens, p.parseCode(codeBlockRe))
+			start = p.idx
 			continue
 		}
-		if ok := t.nextStartsWith([]byte("**")); ok {
-			t.tryConsume([]byte("**"))
-			t.readExpression([]byte("**"))
-			start = t.cursor
+		if p.startsRegex(codeRe) {
+			if p.idx > start {
+				tokens = append(tokens, &Token{Kind: "plain", Value: p.data[start:p.idx]})
+			}
+			tokens = append(tokens, p.parseCode(codeRe))
+			start = p.idx
 			continue
 		}
-		t.cursor += 1
-	}
-	t.tryConsume(delim)
-	t.skipSpace()
-
-	return true
-}
-
-func (t *tokenizer) readHighlight() bool {
-	t.skipSpace()
-	// t.readExpression
-
-	return true
-}
-
-func (t *tokenizer) readHeader() bool {
-	t.tryConsume([]byte("####"))
-	t.tryConsume([]byte("###"))
-	t.tryConsume([]byte("##"))
-	t.tryConsume([]byte("#"))
-
-	t.skipSpace()
-
-	t.readExpression([]byte("\n\n"))
-
-	return true
-}
-
-func (t *tokenizer) readCodeBlock() bool {
-	t.tryConsume([]byte("```"))
-
-	start := t.cursor
-	for {
-		if t.eof() {
-			token := t.data[start:t.cursor]
-			t.push("code", token)
-			break
-		}
-		if ok := t.nextStartsWith([]byte("```")); ok {
-			token := t.data[start:t.cursor]
-			t.push("code", token)
-			t.tryConsume([]byte("```"))
-			break
-		}
-		t.cursor += 1
+		p.idx += 1
 	}
 
-	t.skipSpace()
-
-	return true
-}
-
-func (t *tokenizer) read() bool {
-	t.skipSpace()
-
-	if t.nextStartsWith([]byte("#")) {
-		return t.readHeader()
-	}
-	if t.nextStartsWith([]byte("```")) {
-		return t.readCodeBlock()
+	if p.idx > start {
+		tokens = append(tokens, &Token{Kind: "plain", Value: p.data[start:p.idx]})
 	}
 
-	return t.readExpression([]byte("\n\n"))
+	p.skipRegex(whitespaceRe)
+
+	return tokens
 }
 
-func (t *tokenizer) eof() bool {
-	return t.cursor >= len(t.data)
+func (p *Parser) parseCode(delim *regexp.Regexp) *Token {
+	p.skipRegex(delim)
+
+	start := p.idx
+	for !p.startsRegex(delim) && !p.EOF() {
+		p.skipRegex(escapeRe)
+		p.idx += 1
+	}
+
+	value := p.data[start:p.idx]
+
+	p.skipRegex(delim)
+
+	return &Token{Kind: "code", Value: value}
 }
 
 func main() {
@@ -190,8 +166,10 @@ func main() {
 	as a multiline expr
 
 	And this is a ***scandalous text***.
+	asdsad
+	asdasds i ` + "`code`" + `.
 
-	And [this] is an *italic text*.
+	And \[this] is an *italic text*.
 
 	And
 
@@ -199,6 +177,8 @@ func main() {
 	code block
 	i am
 	a [fucking]
+
+
 	another
 	code block
 	shit
@@ -206,7 +186,7 @@ func main() {
 
 	## Ohshit
 
-	I am a [link](http://markdown.com) here
+	I am a \[link](http://markdown.com) here
 	and multiline
 
 	----
@@ -217,12 +197,7 @@ func main() {
 	multiline.
 	`
 
-	tok := newTokenizer([]byte(test))
-	for !tok.eof() {
-		tok.read()
-	}
-
-	for _, token := range tok.tokens {
-		fmt.Println("<" + string(token) + ">")
-	}
+	parser := NewParser([]byte(test))
+	parser.Parse()
+	parser.Print()
 }

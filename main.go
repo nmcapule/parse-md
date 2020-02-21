@@ -9,6 +9,7 @@ var (
 	whitespaceRe = regexp.MustCompile("^\\s+")
 	blockDelimRe = regexp.MustCompile("^\n\n")
 	escapeRe     = regexp.MustCompile("^\\\\.")
+	highlightRe  = regexp.MustCompile("^\\*\\*")
 	headerRe     = regexp.MustCompile("^#+")
 	codeRe       = regexp.MustCompile("^`")
 	codeBlockRe  = regexp.MustCompile("^```")
@@ -130,6 +131,14 @@ func (p *Parser) parseExpression(delimRe *regexp.Regexp) []*Token {
 			start = p.idx
 			continue
 		}
+		if p.startsRegex(highlightRe) {
+			if p.idx > start {
+				tokens = append(tokens, &Token{Kind: "plain", Value: p.data[start:p.idx]})
+			}
+			tokens = append(tokens, p.parseHighlight())
+			start = p.idx
+			continue
+		}
 		p.idx += 1
 	}
 
@@ -137,9 +146,18 @@ func (p *Parser) parseExpression(delimRe *regexp.Regexp) []*Token {
 		tokens = append(tokens, &Token{Kind: "plain", Value: p.data[start:p.idx]})
 	}
 
+	p.skipRegex(delimRe)
 	p.skipRegex(whitespaceRe)
 
 	return tokens
+}
+
+func (p *Parser) parseHighlight() *Token {
+	p.skipRegex(highlightRe)
+	return &Token{
+		Kind:     "highlight",
+		Children: p.parseExpression(highlightRe),
+	}
 }
 
 func (p *Parser) parseCode(delim *regexp.Regexp) *Token {
